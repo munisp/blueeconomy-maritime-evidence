@@ -99,21 +99,34 @@ func (s *Store) RecordValidation(ctx context.Context, packageID string, request 
 	}
 	defer func() { _ = transaction.Rollback(ctx) }()
 
-	var currentStatus string
+	var existingPackageID string
 	err = transaction.QueryRow(ctx, `
-		SELECT validation_status
+		SELECT evidence_package_id
 		FROM evidence_packages
 		WHERE evidence_package_id = $1
-		FOR SHARE
-	`, packageID).Scan(&currentStatus)
+		FOR KEY SHARE
+	`, packageID).Scan(&existingPackageID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
 	}
 	if err != nil {
-		return fmt.Errorf("load evidence validation status: %w", err)
+		return fmt.Errorf("load evidence package for validation: %w", err)
 	}
-	if currentStatus != StatusReceived {
-		return fmt.Errorf("cannot transition evidence package in terminal status %q", currentStatus)
+
+	var terminalDecisionExists bool
+	err = transaction.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM evidence_validation_history
+			WHERE evidence_package_id = $1
+			  AND validation_status IN ('validated', 'rejected')
+		)
+	`, packageID).Scan(&terminalDecisionExists)
+	if err != nil {
+		return fmt.Errorf("check terminal validation history: %w", err)
+	}
+	if terminalDecisionExists {
+		return errors.New("evidence package already has a terminal validation decision")
 	}
 
 	_, err = transaction.Exec(ctx, `
@@ -121,7 +134,7 @@ func (s *Store) RecordValidation(ctx context.Context, packageID string, request 
 			validation_history_id, evidence_package_id, prior_validation_status, validation_status,
 			reason_code, actor_subject_reference, occurred_at, correlation_id
 		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7)
-	`, packageID, currentStatus, request.ValidationStatus, request.ReasonCode,
+	`, packageID, StatusReceived, request.ValidationStatus, request.ReasonCode,
 		request.ActorSubjectReference, request.OccurredAt.UTC(), request.CorrelationID)
 	if err != nil {
 		return fmt.Errorf("record evidence validation: %w", err)
