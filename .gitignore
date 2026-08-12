@@ -1,0 +1,7 @@
+.env
+*.log
+*.cover.out
+*.coverage.txt
+integration/.env
+integration/results/*
+!integration/results/.gitkeep
