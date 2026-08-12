@@ -2,6 +2,7 @@ package evidence
 
 import (
 	"context"
+	"errors"
 	"os"
 	"sync"
 	"testing"
@@ -58,6 +59,12 @@ func TestStorePostgreSQLIntegration(t *testing.T) {
 	}
 	if wasCreated || repeated.EvidencePackageID != created.EvidencePackageID {
 		t.Fatal("idempotent create did not return the original package")
+	}
+
+	conflicting := request
+	conflicting.ContentSHA256 = "0000000000000000000000000000000000000000000000000000000000000000"
+	if _, _, err := store.Create(ctx, conflicting); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("conflicting idempotency key returned %v instead of ErrIdempotencyConflict", err)
 	}
 
 	if _, err := pool.Exec(ctx, "UPDATE evidence_packages SET external_reference = 'mutated' WHERE evidence_package_id = $1", created.EvidencePackageID); err == nil {

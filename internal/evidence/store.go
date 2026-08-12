@@ -9,7 +9,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-var ErrNotFound = errors.New("evidence package not found")
+var (
+	ErrNotFound            = errors.New("evidence package not found")
+	ErrIdempotencyConflict = errors.New("idempotency key conflicts with retained evidence metadata")
+)
 
 type Store struct {
 	pool *pgxpool.Pool
@@ -35,6 +38,9 @@ func (s *Store) Create(ctx context.Context, request CreateRequest) (Package, boo
 		WHERE idempotency_key = $1
 	`, request.IdempotencyKey), &existing)
 	if err == nil {
+		if !createRequestMatchesPackage(request, existing) {
+			return Package{}, false, ErrIdempotencyConflict
+		}
 		if err := transaction.Commit(ctx); err != nil {
 			return Package{}, false, fmt.Errorf("commit idempotent lookup: %w", err)
 		}
@@ -72,6 +78,17 @@ func (s *Store) Create(ctx context.Context, request CreateRequest) (Package, boo
 		return Package{}, false, fmt.Errorf("commit evidence creation: %w", err)
 	}
 	return created, true, nil
+}
+
+func createRequestMatchesPackage(request CreateRequest, existing Package) bool {
+	return request.IdempotencyKey == existing.IdempotencyKey &&
+		request.ExternalReference == existing.ExternalReference &&
+		request.EvidenceType == existing.EvidenceType &&
+		request.ContentSHA256 == existing.ContentSHA256 &&
+		request.ContentLocation == existing.ContentLocation &&
+		request.ReceivedAt.UTC().Equal(existing.ReceivedAt.UTC()) &&
+		request.Classification == existing.Classification &&
+		request.CorrelationID == existing.CorrelationID
 }
 
 func (s *Store) Get(ctx context.Context, packageID string) (Package, error) {
