@@ -39,7 +39,7 @@ done
 
 export EVIDENCE_TEST_POSTGRES_DSN="postgres://evidence:$password@127.0.0.1:55432/evidence?sslmode=disable"
 cd "$root"
-GOTOOLCHAIN=local go test -count=1 -race -covermode=atomic -coverprofile="$results/integration.cover.out" ./internal/evidence 2>&1 | tee "$results/integration.log"
+go test -count=1 -race -covermode=atomic -coverprofile="$results/integration.cover.out" ./internal/evidence 2>&1 | tee "$results/integration.log"
 go tool cover -func="$results/integration.cover.out" | tee "$results/integration.coverage.txt"
 
 history="$("${compose[@]}" exec -T postgres psql -p 55432 -At -U evidence -d evidence -c "SELECT count(*) || ':' || count(*) FILTER (WHERE validation_status IN ('validated','rejected')) FROM evidence_validation_history" | tr -d '\r')"

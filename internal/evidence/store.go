@@ -29,6 +29,37 @@ func (s *Store) Create(ctx context.Context, request CreateRequest) (Package, boo
 	}
 	defer func() { _ = transaction.Rollback(ctx) }()
 
+	var created Package
+	err = scanPackage(transaction.QueryRow(ctx, `
+		INSERT INTO evidence_packages (
+			evidence_package_id, idempotency_key, external_reference, evidence_type,
+			content_sha256, content_location, received_at, validation_status, classification, correlation_id
+		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9)
+		ON CONFLICT (idempotency_key) DO NOTHING
+		RETURNING evidence_package_id, idempotency_key, external_reference, evidence_type,
+		          content_sha256, content_location, received_at, classification, correlation_id,
+		          created_at, validation_status
+	`, request.IdempotencyKey, request.ExternalReference, request.EvidenceType, request.ContentSHA256,
+		request.ContentLocation, request.ReceivedAt.UTC(), StatusReceived, request.Classification, request.CorrelationID), &created)
+	if err == nil {
+		_, err = transaction.Exec(ctx, `
+			INSERT INTO evidence_validation_history (
+				validation_history_id, evidence_package_id, prior_validation_status, validation_status,
+				reason_code, actor_subject_reference, occurred_at, correlation_id
+			) VALUES (gen_random_uuid(), $1, NULL, $2, $3, $4, $5, $6)
+		`, created.EvidencePackageID, StatusReceived, "evidence_package_received", "system:evidence-service", created.ReceivedAt, created.CorrelationID)
+		if err != nil {
+			return Package{}, false, fmt.Errorf("record initial validation history: %w", err)
+		}
+		if err := transaction.Commit(ctx); err != nil {
+			return Package{}, false, fmt.Errorf("commit evidence creation: %w", err)
+		}
+		return created, true, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return Package{}, false, fmt.Errorf("insert evidence package: %w", err)
+	}
+
 	var existing Package
 	err = scanPackage(transaction.QueryRow(ctx, `
 		SELECT evidence_package_id, idempotency_key, external_reference, evidence_type,
@@ -36,48 +67,18 @@ func (s *Store) Create(ctx context.Context, request CreateRequest) (Package, boo
 		       created_at, validation_status
 		FROM evidence_packages
 		WHERE idempotency_key = $1
+		FOR KEY SHARE
 	`, request.IdempotencyKey), &existing)
-	if err == nil {
-		if !createRequestMatchesPackage(request, existing) {
-			return Package{}, false, ErrIdempotencyConflict
-		}
-		if err := transaction.Commit(ctx); err != nil {
-			return Package{}, false, fmt.Errorf("commit idempotent lookup: %w", err)
-		}
-		return existing, false, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return Package{}, false, fmt.Errorf("look up idempotency key: %w", err)
-	}
-
-	var created Package
-	err = scanPackage(transaction.QueryRow(ctx, `
-		INSERT INTO evidence_packages (
-			evidence_package_id, idempotency_key, external_reference, evidence_type,
-			content_sha256, content_location, received_at, validation_status, classification, correlation_id
-		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9)
-		RETURNING evidence_package_id, idempotency_key, external_reference, evidence_type,
-		          content_sha256, content_location, received_at, classification, correlation_id,
-		          created_at, validation_status
-	`, request.IdempotencyKey, request.ExternalReference, request.EvidenceType, request.ContentSHA256,
-		request.ContentLocation, request.ReceivedAt.UTC(), StatusReceived, request.Classification, request.CorrelationID), &created)
 	if err != nil {
-		return Package{}, false, fmt.Errorf("insert evidence package: %w", err)
+		return Package{}, false, fmt.Errorf("load retained idempotency key: %w", err)
 	}
-
-	_, err = transaction.Exec(ctx, `
-		INSERT INTO evidence_validation_history (
-			validation_history_id, evidence_package_id, prior_validation_status, validation_status,
-			reason_code, actor_subject_reference, occurred_at, correlation_id
-		) VALUES (gen_random_uuid(), $1, NULL, $2, $3, $4, $5, $6)
-	`, created.EvidencePackageID, StatusReceived, "evidence_package_received", "system:evidence-service", created.ReceivedAt, created.CorrelationID)
-	if err != nil {
-		return Package{}, false, fmt.Errorf("record initial validation history: %w", err)
+	if !createRequestMatchesPackage(request, existing) {
+		return Package{}, false, ErrIdempotencyConflict
 	}
 	if err := transaction.Commit(ctx); err != nil {
-		return Package{}, false, fmt.Errorf("commit evidence creation: %w", err)
+		return Package{}, false, fmt.Errorf("commit idempotent lookup: %w", err)
 	}
-	return created, true, nil
+	return existing, false, nil
 }
 
 func createRequestMatchesPackage(request CreateRequest, existing Package) bool {
