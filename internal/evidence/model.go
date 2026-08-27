@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -69,7 +70,44 @@ func DecodeCreateRequest(body []byte) (CreateRequest, error) {
 	return request, nil
 }
 
+// LocationPolicy controls which content_location schemes are accepted. The
+// Azure Government posture accepts https and abfs (ADLS Gen2 on
+// dfs.core.usgovcloudapi.net); the legacy s3 scheme is deprecated and accepted
+// only under an explicit operator opt-in.
+type LocationPolicy struct {
+	// AllowLegacyS3 accepts s3: content locations. It must be enabled only by
+	// approved legacy-data migrations, never for new evidence intake.
+	AllowLegacyS3 bool
+}
+
+// EnvAllowLegacyS3 is the fail-closed operator flag for the deprecated s3
+// scheme. Only the exact value "true" enables it.
+const EnvAllowLegacyS3 = "EVIDENCE_ALLOW_LEGACY_S3"
+
+// LocationPolicyFromEnv resolves the effective policy. Unset means s3 is
+// rejected; an unrecognised value fails closed instead of being silently
+// interpreted.
+func LocationPolicyFromEnv() (LocationPolicy, error) {
+	switch value := strings.TrimSpace(os.Getenv(EnvAllowLegacyS3)); value {
+	case "", "false":
+		return LocationPolicy{}, nil
+	case "true":
+		return LocationPolicy{AllowLegacyS3: true}, nil
+	default:
+		return LocationPolicy{}, fmt.Errorf("%s must be true or false when set", EnvAllowLegacyS3)
+	}
+}
+
 func (r CreateRequest) Validate() error {
+	policy, err := LocationPolicyFromEnv()
+	if err != nil {
+		return err
+	}
+	return r.ValidateWithPolicy(policy)
+}
+
+// ValidateWithPolicy validates against an explicit content-location policy.
+func (r CreateRequest) ValidateWithPolicy(policy LocationPolicy) error {
 	if !isUUID(r.IdempotencyKey) {
 		return errors.New("idempotency_key must be a UUID")
 	}
@@ -85,7 +123,7 @@ func (r CreateRequest) Validate() error {
 	if !validSHA256(r.ContentSHA256) {
 		return errors.New("content_sha256 must be a lower-case SHA-256 hexadecimal digest")
 	}
-	if err := validateContentLocation(r.ContentLocation); err != nil {
+	if err := validateContentLocation(r.ContentLocation, policy); err != nil {
 		return err
 	}
 	if r.ReceivedAt.IsZero() {
@@ -124,18 +162,88 @@ func validSHA256(value string) bool {
 	return err == nil && hex.EncodeToString(decoded) == value
 }
 
-func validateContentLocation(value string) error {
+func validateContentLocation(value string, policy LocationPolicy) error {
 	parsed, err := url.ParseRequestURI(value)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return errors.New("content_location must be an absolute object-storage or HTTPS URL")
 	}
-	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return errors.New("content_location must not contain credentials, query parameters or fragments")
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("content_location must not contain query parameters or fragments")
 	}
-	if parsed.Scheme != "https" && parsed.Scheme != "s3" {
-		return errors.New("content_location must use https or s3")
+	switch parsed.Scheme {
+	case "https":
+		if parsed.User != nil {
+			return errors.New("content_location must not contain credentials")
+		}
+		return nil
+	case "s3":
+		if !policy.AllowLegacyS3 {
+			return errors.New("content_location scheme s3 is deprecated under the Azure Government posture; set EVIDENCE_ALLOW_LEGACY_S3=true only for approved legacy migrations")
+		}
+		if parsed.User != nil {
+			return errors.New("content_location must not contain credentials")
+		}
+		return nil
+	case "abfs":
+		return validateABFSLocation(parsed)
+	default:
+		return errors.New("content_location must use https or abfs (s3 is deprecated)")
+	}
+}
+
+// validateABFSLocation enforces the ADLS Gen2 Azure Government form
+// abfs://<filesystem>@<account>.dfs.core.usgovcloudapi.net/<object-path>.
+// The userinfo position carries the filesystem (addressing, not a credential);
+// passwords, ports, query and fragment remain prohibited.
+func validateABFSLocation(parsed *url.URL) error {
+	user := parsed.User
+	if user == nil {
+		return errors.New("abfs content_location must name a filesystem: abfs://<filesystem>@<account>.dfs.core.usgovcloudapi.net/<path>")
+	}
+	if _, hasPassword := user.Password(); hasPassword {
+		return errors.New("abfs content_location must not contain credentials")
+	}
+	filesystem := user.Username()
+	if len(filesystem) < 3 || len(filesystem) > 63 || !isLowerDNSLabel(filesystem) {
+		return errors.New("abfs filesystem name must be 3-63 lower-case letters, digits or hyphens")
+	}
+	const govDFSSuffix = ".dfs.core.usgovcloudapi.net"
+	host := parsed.Host
+	if parsed.Port() != "" || !strings.HasSuffix(host, govDFSSuffix) {
+		return errors.New("abfs content_location must target an Azure Government ADLS Gen2 endpoint (dfs.core.usgovcloudapi.net) without a port")
+	}
+	account := strings.TrimSuffix(host, govDFSSuffix)
+	if len(account) < 3 || len(account) > 24 || !isLowerAlnum(account) {
+		return errors.New("abfs account name must be 3-24 lower-case letters or digits")
+	}
+	if parsed.Path == "" || parsed.Path == "/" {
+		return errors.New("abfs content_location must include an object path")
 	}
 	return nil
+}
+
+func isLowerDNSLabel(value string) bool {
+	if value == "" || value[0] == '-' || value[len(value)-1] == '-' {
+		return false
+	}
+	for _, character := range value {
+		if !((character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') || character == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+func isLowerAlnum(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if !((character >= 'a' && character <= 'z') || (character >= '0' && character <= '9')) {
+			return false
+		}
+	}
+	return true
 }
 
 func isUUID(value string) bool {
