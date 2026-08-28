@@ -23,7 +23,7 @@ func TestStoreConcurrentIdempotentCreatePostgreSQLIntegration(t *testing.T) {
 		t.Fatalf("open PostgreSQL pool: %v", err)
 	}
 	defer pool.Close()
-	if _, err := pool.Exec(ctx, "TRUNCATE evidence_validation_history, evidence_packages"); err != nil {
+	if _, err := pool.Exec(ctx, "TRUNCATE evidence_package_supersession, evidence_validation_history, evidence_packages"); err != nil {
 		t.Fatalf("reset evidence tables: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `
