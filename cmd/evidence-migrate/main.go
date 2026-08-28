@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/munisp/blueeconomy-maritime-evidence/internal/evidence"
+	"github.com/munisp/blueeconomy-maritime-evidence/internal/provenance"
 )
 
 func main() {
@@ -129,6 +131,13 @@ func runLegacyS3(arguments []string) {
 	if err != nil {
 		fail(err)
 	}
+	// Fail-closed: an --apply run emits a signed provenance attestation for
+	// every completed re-registration; without the producer key no run may
+	// start, so no unattested re-registration can ever complete.
+	signer, err := provenance.LoadSignerFromEnv(evidence.SigningKeyID)
+	if err != nil {
+		fail(fmt.Errorf("load provenance signer: %w", err))
+	}
 	fmt.Printf("Re-registration run correlation id: %s\n", correlationID)
 
 	legacyPackages, err := migration.ListLegacyS3Packages(ctx, targetPrefix)
@@ -161,8 +170,19 @@ func runLegacyS3(arguments []string) {
 			fail(fmt.Errorf("package %s: %w", legacy.Package.EvidencePackageID, err))
 		}
 		completed++
+		attestation, err := evidence.SignReregistrationAttestation(signer,
+			legacy.Package.EvidencePackageID, replacement.EvidencePackageID,
+			plan.TargetLocation, actor, correlationID, time.Now())
+		if err != nil {
+			fail(fmt.Errorf("package %s: %w", legacy.Package.EvidencePackageID, err))
+		}
+		encoded, err := json.Marshal(attestation)
+		if err != nil {
+			fail(fmt.Errorf("package %s: encode attestation: %w", legacy.Package.EvidencePackageID, err))
+		}
 		fmt.Printf("re-registered %s -> %s (replacement %s)\n",
 			legacy.Package.EvidencePackageID, plan.TargetLocation, replacement.EvidencePackageID)
+		fmt.Printf("attestation %s\n", encoded)
 	}
 	fmt.Printf("Re-registration complete: %d re-registered, %d already superseded.\n", completed, skipped)
 }
