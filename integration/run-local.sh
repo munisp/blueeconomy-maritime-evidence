@@ -34,8 +34,9 @@ for _ in $(seq 1 60); do
 done
 "${compose[@]}" exec -T postgres pg_isready -U evidence -d evidence -p 55432 >/dev/null
 
-"${compose[@]}" exec -T postgres psql -p 55432 -v ON_ERROR_STOP=1 -U evidence -d evidence < "$root/db/migrations/0001_evidence.sql"
-"${compose[@]}" exec -T postgres psql -p 55432 -v ON_ERROR_STOP=1 -U evidence -d evidence < "$root/db/migrations/0002_terminal_validation_invariant.sql"
+for migration in "$root"/db/migrations/*.sql; do
+  "${compose[@]}" exec -T postgres psql -p 55432 -v ON_ERROR_STOP=1 -U evidence -d evidence < "$migration"
+done
 
 export EVIDENCE_TEST_POSTGRES_DSN="postgres://evidence:$password@127.0.0.1:55432/evidence?sslmode=disable"
 cd "$root"

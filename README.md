@@ -18,6 +18,8 @@ Content-location schemes accepted under the Azure Government posture:
 
 Migration [`db/migrations/0003_azure_gov_content_location.sql`](db/migrations/0003_azure_gov_content_location.sql) adds the matching `NOT VALID` database constraint so legacy `s3:` rows already stored do not block adoption.
 
+Legacy `s3:` rows are retired by re-registration, not by updating the immutable package row: the object is copied to the approved abfs location, a new package row is registered against the verified digest, and the old→new link is recorded in the append-only `evidence_package_supersession` table ([`db/migrations/0004_legacy_s3_supersession.sql`](db/migrations/0004_legacy_s3_supersession.sql)). The supported procedure and the `evidence-migrate legacy-s3 --dry-run|--apply` helper are documented in [docs/legacy-s3-migration.md](docs/legacy-s3-migration.md).
+
 ## Deployment and integration boundary
 
 This repository does **not** claim that an evidence API, Keycloak realm, APISIX route, Kafka event, Temporal workflow, object store or Ministry/partner document interface is live. A real deployment requires the approved PostgreSQL target, object-store contract, Keycloak/OIDC identity model, API-edge route policy, event contract and authorised non-production evidence source described in the programme integration gates.

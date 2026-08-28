@@ -8,7 +8,7 @@ This suite runs the repository against a real local PostgreSQL 16 container. It 
 ./integration/run-local.sh
 ```
 
-The runner generates an ephemeral PostgreSQL password, applies both committed migrations and runs the race-enabled Go integration test. It verifies that:
+The runner generates an ephemeral PostgreSQL password, applies all committed migrations and runs the race-enabled Go integration test. It verifies that:
 
 | Invariant | Assertion |
 |---|---|

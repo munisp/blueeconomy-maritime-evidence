@@ -166,8 +166,15 @@ func (s *Store) RecordValidation(ctx context.Context, packageID string, request 
 	return nil
 }
 
-func scanPackage(row pgx.Row, destination *Package) error {
-	if err := row.Scan(
+// rowScanner is satisfied by both pgx.Row and pgx.Rows, so single-row and
+// multi-row queries share one package scan. Extra destinations are appended
+// after the package columns for queries that join supplementary state.
+type rowScanner interface {
+	Scan(destinations ...any) error
+}
+
+func scanPackage(row rowScanner, destination *Package, extra ...any) error {
+	destinations := append([]any{
 		&destination.EvidencePackageID,
 		&destination.IdempotencyKey,
 		&destination.ExternalReference,
@@ -179,7 +186,8 @@ func scanPackage(row pgx.Row, destination *Package) error {
 		&destination.CorrelationID,
 		&destination.CreatedAt,
 		&destination.ValidationStatus,
-	); err != nil {
+	}, extra...)
+	if err := row.Scan(destinations...); err != nil {
 		return err
 	}
 	destination.ReceivedAt = destination.ReceivedAt.UTC()
