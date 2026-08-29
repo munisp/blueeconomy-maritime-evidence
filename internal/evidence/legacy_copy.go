@@ -80,7 +80,10 @@ func (c StagedCommandCopier) CopyAndVerify(ctx context.Context, legacy Package, 
 	if plan.LegacyPackageID == "" || plan.LegacyPackageID != legacy.EvidencePackageID {
 		return errors.New("re-registration plan does not match the legacy package")
 	}
-	staged := filepath.Join(c.WorkDir, legacy.EvidencePackageID+".staged")
+	staged, err := c.stagedPath(legacy.EvidencePackageID, ".staged")
+	if err != nil {
+		return err
+	}
 	defer func() { _ = os.Remove(staged) }()
 
 	if err := c.run(ctx, c.AWSCLI, "s3", "cp", legacy.ContentLocation, staged); err != nil {
@@ -94,7 +97,10 @@ func (c StagedCommandCopier) CopyAndVerify(ctx context.Context, legacy Package, 
 		return fmt.Errorf("upload replacement object %s: %w", plan.TargetLocation, err)
 	}
 
-	verify := filepath.Join(c.WorkDir, legacy.EvidencePackageID+".verify")
+	verify, err := c.stagedPath(legacy.EvidencePackageID, ".verify")
+	if err != nil {
+		return err
+	}
 	defer func() { _ = os.Remove(verify) }()
 	if err := c.run(ctx, c.AzCopy, "copy", plan.TargetLocation, verify); err != nil {
 		return fmt.Errorf("re-download replacement object %s for verification: %w", plan.TargetLocation, err)
@@ -104,6 +110,41 @@ func (c StagedCommandCopier) CopyAndVerify(ctx context.Context, legacy Package, 
 			plan.TargetLocation, err)
 	}
 	return nil
+}
+
+// stagedPath builds the staging file path for one DB-supplied package ID.
+// The ID is read from the packages database, so it is validated before it
+// touches the filesystem: it must be a UUID or a strict alphanumeric-dash
+// token (no path separators, dots, or whitespace). As defense-in-depth the
+// joined path must also resolve to a file directly inside WorkDir. Anything
+// else fails closed before any operator CLI runs.
+func (c StagedCommandCopier) stagedPath(packageID, suffix string) (string, error) {
+	if !validStagingPackageID(packageID) {
+		return "", fmt.Errorf("evidence package id %q is not safe to use as a staging file name", packageID)
+	}
+	joined := filepath.Join(c.WorkDir, packageID+suffix)
+	if filepath.Dir(joined) != filepath.Clean(c.WorkDir) {
+		return "", fmt.Errorf("staging path for evidence package id %q escapes the staging directory", packageID)
+	}
+	return joined, nil
+}
+
+func validStagingPackageID(value string) bool {
+	if isUUID(value) {
+		return true
+	}
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, character := range value {
+		if !((character >= '0' && character <= '9') ||
+			(character >= 'a' && character <= 'z') ||
+			(character >= 'A' && character <= 'Z') ||
+			character == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 func (c StagedCommandCopier) run(ctx context.Context, binary string, arguments ...string) error {

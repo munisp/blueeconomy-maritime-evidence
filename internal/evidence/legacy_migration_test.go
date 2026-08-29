@@ -111,6 +111,63 @@ func TestCopyAndVerifyRejectsMismatchedPlan(t *testing.T) {
 	}
 }
 
+func TestCopyAndVerifyRejectsUnsafePackageID(t *testing.T) {
+	workDir := t.TempDir()
+	copier := StagedCommandCopier{AWSCLI: "aws", AzCopy: "azcopy", WorkDir: workDir}
+	base := Package{
+		ContentLocation: "s3://agency-evidence/object",
+		ContentSHA256:   hex.EncodeToString(sha256Sum([]byte("bytes"))),
+		ReceivedAt:      time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC),
+	}
+	// (the empty id is already refused by the plan-match guard above)
+	for _, id := range []string{"../etc", "..", "case/pkg", "pkg.evidence", "pkg evidence", "pkg;rm"} {
+		legacy := base
+		legacy.EvidencePackageID = id
+		plan := LegacyS3Plan{
+			LegacyPackageID: id,
+			TargetLocation:  testTargetPrefix + "/agency-evidence/object",
+		}
+		err := copier.CopyAndVerify(t.Context(), legacy, plan)
+		if err == nil {
+			t.Fatalf("package id %q must be rejected before any copy", id)
+		}
+		if !strings.Contains(err.Error(), "not safe to use as a staging file name") {
+			t.Fatalf("package id %q rejection must name the cause, got: %v", id, err)
+		}
+	}
+	// No staging file may have been created, inside or outside the work dir.
+	entries, readErr := os.ReadDir(workDir)
+	if readErr != nil {
+		t.Fatalf("list staging directory: %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("rejected package ids must not leave staging files, found %d", len(entries))
+	}
+	if _, statErr := os.Stat(filepath.Join(workDir, "..", "etc.staged")); statErr == nil {
+		t.Fatal("a traversal package id must never create a file outside the staging directory")
+	}
+}
+
+func TestStagedPathAcceptsUUIDAndDashTokens(t *testing.T) {
+	copier := StagedCommandCopier{WorkDir: t.TempDir()}
+	for _, id := range []string{
+		"11111111-1111-4111-8111-111111111111",
+		"PKG-2026-0001-a",
+		"018f3c2a7b9e4f1d9c2b8a6e5d4f3a21",
+	} {
+		staged, err := copier.stagedPath(id, ".staged")
+		if err != nil {
+			t.Fatalf("package id %q must stay usable: %v", id, err)
+		}
+		if filepath.Dir(staged) != filepath.Clean(copier.WorkDir) {
+			t.Fatalf("staging path %q must stay directly inside the staging directory", staged)
+		}
+		if filepath.Base(staged) != id+".staged" {
+			t.Fatalf("staging file name %q must derive from the package id", staged)
+		}
+	}
+}
+
 func TestNewMigrationCorrelationID(t *testing.T) {
 	first, err := NewMigrationCorrelationID()
 	if err != nil {
