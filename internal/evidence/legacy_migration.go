@@ -11,6 +11,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // ReasonLegacyS3ReRegistration is the validation-history and supersession
@@ -167,6 +169,10 @@ func (m *LegacyMigration) ListLegacyS3Packages(ctx context.Context, targetPrefix
 // occurredAt is the re-registration instant recorded in validation history;
 // the replacement row retains the legacy received_at because the evidentiary
 // content and its receipt are unchanged.
+// RegisterReplacement re-registers one legacy s3 package at its verified
+// target location and supersedes the legacy row — the chain-of-custody
+// operation of the legacy migration runbook. Traced as a custody operation:
+// the span carries the correlation id only, never package or actor identity.
 func (m *LegacyMigration) RegisterReplacement(
 	ctx context.Context,
 	legacy Package,
@@ -174,7 +180,10 @@ func (m *LegacyMigration) RegisterReplacement(
 	actorSubjectReference string,
 	correlationID string,
 	occurredAt time.Time,
-) (Package, error) {
+) (replacementPackage Package, err error) {
+	ctx, span := custodyTracer().Start(ctx, "evidence.legacy.register_replacement",
+		trace.WithAttributes(attribute.String("evidence.correlation_id", correlationID)))
+	defer func() { endCustodySpan(span, err) }()
 	if strings.TrimSpace(actorSubjectReference) == "" {
 		return Package{}, errors.New("actor subject reference is required for re-registration")
 	}

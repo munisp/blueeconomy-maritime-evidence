@@ -12,13 +12,31 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/exaring/otelpgx"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/munisp/blueeconomy-maritime-evidence/internal/evidence"
 	"github.com/munisp/blueeconomy-maritime-evidence/internal/provenance"
+	"github.com/munisp/blueeconomy-maritime-evidence/internal/telemetry"
 )
 
 func main() {
+	// Telemetry is environment-configured: without OTEL_EXPORTER_OTLP_ENDPOINT
+	// the run is byte-identical to pre-instrumentation behavior (no-op
+	// tracer); when set, spans export batched/async and flush on exit.
+	telemetryConfig, err := telemetry.LoadConfig("blueeconomy-maritime-evidence")
+	if err != nil {
+		fail(err)
+	}
+	pipeline, err := telemetry.Setup(context.Background(), telemetryConfig)
+	if err != nil {
+		fail(fmt.Errorf("telemetry setup: %w", err))
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = pipeline.Shutdown(shutdownCtx)
+	}()
 	if len(os.Args) > 1 && os.Args[1] == "legacy-s3" {
 		runLegacyS3(os.Args[2:])
 		return
@@ -194,7 +212,14 @@ func mustPool() *pgxpool.Pool {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	pool, err := pgxpool.New(ctx, databaseURL)
+	// otelpgx traces every migration/custody query as a span; with the no-op
+	// global provider (telemetry disabled) it is a pass-through.
+	poolConfig, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		fail(fmt.Errorf("parse PostgreSQL configuration: %w", err))
+	}
+	poolConfig.ConnConfig.Tracer = otelpgx.NewTracer()
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		fail(fmt.Errorf("connect to PostgreSQL: %w", err))
 	}
