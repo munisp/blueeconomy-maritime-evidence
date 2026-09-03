@@ -47,3 +47,29 @@ func validCreateRequest() CreateRequest {
 		CorrelationID:     "77c0e43b-f3a3-43f4-aa3d-113f67e1581a",
 	}
 }
+
+// TestValidationTransitionMatrix pins the validation state machine: from the
+// received state only validated and rejected are legal terminal transitions;
+// anything else (including re-received) is rejected before persistence.
+func TestValidationTransitionMatrix(t *testing.T) {
+	base := ValidationRequest{
+		ReasonCode:            "integrity_confirmed",
+		ActorSubjectReference: "service:validator",
+		OccurredAt:            time.Now().UTC(),
+		CorrelationID:         "22222222-2222-4222-8222-222222222222",
+	}
+	for _, status := range []string{StatusValidated, StatusRejected} {
+		request := base
+		request.ValidationStatus = status
+		if err := request.Validate(); err != nil {
+			t.Fatalf("terminal transition %s must be legal: %v", status, err)
+		}
+	}
+	for _, status := range []string{"", StatusReceived, "pending", "VALIDATED"} {
+		request := base
+		request.ValidationStatus = status
+		if err := request.Validate(); err == nil {
+			t.Fatalf("transition %q from received must be rejected", status)
+		}
+	}
+}
