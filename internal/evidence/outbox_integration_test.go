@@ -67,6 +67,7 @@ func TestStoreOutboxIntegration(t *testing.T) {
 
 	request := CreateRequest{
 		IdempotencyKey:    "99999999-9999-4999-8999-999999999999",
+		TenantID:          "tenant-test",
 		ExternalReference: "outbox-integration-reference",
 		EvidenceType:      "integration.outbox",
 		ContentSHA256:     "277089d91c0bdf4f2e6862ba7e4a07605119431f5d13f726dd352b06f1b206a9",
@@ -185,6 +186,7 @@ func TestOutboxRLSDefaultDeny(t *testing.T) {
 	// Seed one package so the unauthorized insert attempt has a source row.
 	if _, _, err := NewStore(pool).Create(ctx, CreateRequest{
 		IdempotencyKey:    "12121212-1212-4212-8212-121212121212",
+		TenantID:          "tenant-test",
 		ExternalReference: "rls-probe-reference",
 		EvidenceType:      "integration.rls",
 		ContentSHA256:     "277089d91c0bdf4f2e6862ba7e4a07605119431f5d13f726dd352b06f1b206a9",
@@ -224,6 +226,7 @@ func TestStoreWithoutEventsLeavesOutboxEmpty(t *testing.T) {
 	store := NewStore(pool)
 	request := CreateRequest{
 		IdempotencyKey:    "66666666-6666-4666-8666-666666666666",
+		TenantID:          "tenant-test",
 		ExternalReference: "no-events-reference",
 		EvidenceType:      "integration.outbox",
 		ContentSHA256:     "277089d91c0bdf4f2e6862ba7e4a07605119431f5d13f726dd352b06f1b206a9",
@@ -260,6 +263,7 @@ func TestListIntegration(t *testing.T) {
 	} {
 		if _, _, err := store.Create(ctx, CreateRequest{
 			IdempotencyKey:    key,
+			TenantID:          "tenant-test",
 			ExternalReference: "list-reference",
 			EvidenceType:      "integration.list",
 			ContentSHA256:     "277089d91c0bdf4f2e6862ba7e4a07605119431f5d13f726dd352b06f1b206a9",
@@ -271,14 +275,14 @@ func TestListIntegration(t *testing.T) {
 			t.Fatalf("seed list package: %v", err)
 		}
 	}
-	page, err := store.List(ctx, 2, 0)
+	page, err := store.List(ctx, "tenant-test", 2, 0)
 	if err != nil {
 		t.Fatalf("list page 1: %v", err)
 	}
 	if len(page) != 2 {
 		t.Fatalf("expected 2 rows on page 1, got %d", len(page))
 	}
-	page, err = store.List(ctx, 2, 2)
+	page, err = store.List(ctx, "tenant-test", 2, 2)
 	if err != nil {
 		t.Fatalf("list page 2: %v", err)
 	}
