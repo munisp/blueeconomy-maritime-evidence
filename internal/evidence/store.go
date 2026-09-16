@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -94,6 +95,9 @@ func (s *Store) enqueueOutbox(ctx context.Context, tx pgx.Tx, eventType, topic, 
 }
 
 func (s *Store) Create(ctx context.Context, request CreateRequest) (Package, bool, error) {
+	if strings.TrimSpace(request.TenantID) == "" {
+		return Package{}, false, errors.New("evidence creation requires a tenant binding")
+	}
 	transaction, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return Package{}, false, fmt.Errorf("begin evidence creation transaction: %w", err)
@@ -103,14 +107,14 @@ func (s *Store) Create(ctx context.Context, request CreateRequest) (Package, boo
 	var created Package
 	err = scanPackage(transaction.QueryRow(ctx, `
 		INSERT INTO evidence_packages (
-			evidence_package_id, idempotency_key, external_reference, evidence_type,
+			evidence_package_id, idempotency_key, tenant_id, external_reference, evidence_type,
 			content_sha256, content_location, received_at, validation_status, classification, correlation_id
-		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9)
-		ON CONFLICT (idempotency_key) DO NOTHING
-		RETURNING evidence_package_id, idempotency_key, external_reference, evidence_type,
+		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
+		RETURNING evidence_package_id, idempotency_key, tenant_id, external_reference, evidence_type,
 		          content_sha256, content_location, received_at, classification, correlation_id,
 		          created_at, validation_status
-	`, request.IdempotencyKey, request.ExternalReference, request.EvidenceType, request.ContentSHA256,
+	`, request.IdempotencyKey, request.TenantID, request.ExternalReference, request.EvidenceType, request.ContentSHA256,
 		request.ContentLocation, request.ReceivedAt.UTC(), StatusReceived, request.Classification, request.CorrelationID), &created)
 	if err == nil {
 		_, err = transaction.Exec(ctx, `
@@ -145,13 +149,13 @@ func (s *Store) Create(ctx context.Context, request CreateRequest) (Package, boo
 
 	var existing Package
 	err = scanPackage(transaction.QueryRow(ctx, `
-		SELECT evidence_package_id, idempotency_key, external_reference, evidence_type,
+		SELECT evidence_package_id, idempotency_key, tenant_id, external_reference, evidence_type,
 		       content_sha256, content_location, received_at, classification, correlation_id,
 		       created_at, validation_status
 		FROM evidence_packages
-		WHERE idempotency_key = $1
+		WHERE tenant_id = $1 AND idempotency_key = $2
 		FOR KEY SHARE
-	`, request.IdempotencyKey), &existing)
+	`, request.TenantID, request.IdempotencyKey), &existing)
 	if err != nil {
 		return Package{}, false, fmt.Errorf("load retained idempotency key: %w", err)
 	}
@@ -178,7 +182,7 @@ func createRequestMatchesPackage(request CreateRequest, existing Package) bool {
 func (s *Store) Get(ctx context.Context, packageID string) (Package, error) {
 	var record Package
 	err := scanPackage(s.pool.QueryRow(ctx, `
-		SELECT evidence_package_id, idempotency_key, external_reference, evidence_type,
+		SELECT evidence_package_id, idempotency_key, tenant_id, external_reference, evidence_type,
 		       content_sha256, content_location, received_at, classification, correlation_id,
 		       created_at, validation_status
 		FROM evidence_packages
@@ -230,21 +234,44 @@ func (s *Store) RecordValidation(ctx context.Context, packageID string, request 
 		return ErrTerminalValidation
 	}
 
+	// The transition record must name the actual prior state, not a hardcoded
+	// constant: derive it from the latest history row (the initial 'received'
+	// entry written at creation when no validation exists yet).
+	priorStatus := StatusReceived
+	if err := transaction.QueryRow(ctx, `
+		SELECT validation_status
+		FROM evidence_validation_history
+		WHERE evidence_package_id = $1
+		ORDER BY occurred_at DESC, validation_history_id DESC
+		LIMIT 1
+	`, packageID).Scan(&priorStatus); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("load prior validation status: %w", err)
+	}
+
 	_, err = transaction.Exec(ctx, `
 		INSERT INTO evidence_validation_history (
 			validation_history_id, evidence_package_id, prior_validation_status, validation_status,
 			reason_code, actor_subject_reference, occurred_at, correlation_id
 		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7)
-	`, packageID, StatusReceived, request.ValidationStatus, request.ReasonCode,
+	`, packageID, priorStatus, request.ValidationStatus, request.ReasonCode,
 		request.ActorSubjectReference, request.OccurredAt.UTC(), request.CorrelationID)
 	if err != nil {
 		return fmt.Errorf("record evidence validation: %w", err)
 	}
 
+	// Persist the terminal status on the package row. The narrowed
+	// immutability trigger (migration 0004) admits exactly this
+	// received -> validated|rejected transition and nothing else.
+	if _, err := transaction.Exec(ctx, `
+		UPDATE evidence_packages SET validation_status = $2 WHERE evidence_package_id = $1
+	`, packageID, request.ValidationStatus); err != nil {
+		return fmt.Errorf("persist evidence validation status: %w", err)
+	}
+
 	if err := s.enqueueOutbox(ctx, transaction, "evidence.validation.recorded", events.TopicValidation,
 		request.CorrelationID, packageID, map[string]any{
 			"evidence_package_id":     packageID,
-			"prior_validation_status": StatusReceived,
+			"prior_validation_status": priorStatus,
 			"validation_status":       request.ValidationStatus,
 			"reason_code":             request.ReasonCode,
 			"actor_subject_reference": request.ActorSubjectReference,
@@ -253,8 +280,8 @@ func (s *Store) RecordValidation(ctx context.Context, packageID string, request 
 		return err
 	}
 
-	// The package row is immutable by design. Its original received status is retained;
-	// current state is derived from append-only history for auditability.
+	// The history row and the package status transition commit atomically; the
+	// append-only history remains the chain-of-custody record.
 	if err := transaction.Commit(ctx); err != nil {
 		return fmt.Errorf("commit validation history: %w", err)
 	}
@@ -265,6 +292,7 @@ func scanPackage(row pgx.Row, destination *Package) error {
 	if err := row.Scan(
 		&destination.EvidencePackageID,
 		&destination.IdempotencyKey,
+		&destination.TenantID,
 		&destination.ExternalReference,
 		&destination.EvidenceType,
 		&destination.ContentSHA256,
@@ -286,17 +314,22 @@ func scanPackage(row pgx.Row, destination *Package) error {
 // already carries a terminal validated/rejected decision.
 var ErrTerminalValidation = errors.New("evidence package already has a terminal validation decision")
 
-// List returns packages ordered by received_at descending with a caller
-// bound of limit/offset. Callers cap limit before invocation.
-func (s *Store) List(ctx context.Context, limit, offset int) ([]Package, error) {
+// List returns one tenant's packages ordered by received_at descending with a
+// caller bound of limit/offset. Callers cap limit before invocation. The
+// tenant scope is mandatory (H2): no query may span tenants.
+func (s *Store) List(ctx context.Context, tenantID string, limit, offset int) ([]Package, error) {
+	if strings.TrimSpace(tenantID) == "" {
+		return nil, errors.New("evidence listing requires a tenant scope")
+	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT evidence_package_id, idempotency_key, external_reference, evidence_type,
+		SELECT evidence_package_id, idempotency_key, tenant_id, external_reference, evidence_type,
 		       content_sha256, content_location, received_at, classification, correlation_id,
 		       created_at, validation_status
 		FROM evidence_packages
+		WHERE tenant_id = $1
 		ORDER BY received_at DESC, evidence_package_id
-		LIMIT $1 OFFSET $2
-	`, limit, offset)
+		LIMIT $2 OFFSET $3
+	`, tenantID, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("list evidence packages: %w", err)
 	}
@@ -307,6 +340,7 @@ func (s *Store) List(ctx context.Context, limit, offset int) ([]Package, error) 
 		if err := rows.Scan(
 			&record.EvidencePackageID,
 			&record.IdempotencyKey,
+			&record.TenantID,
 			&record.ExternalReference,
 			&record.EvidenceType,
 			&record.ContentSHA256,
