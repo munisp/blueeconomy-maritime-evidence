@@ -38,6 +38,7 @@ func TestValidationRejectsReceivedAsTerminalAction(t *testing.T) {
 func validCreateRequest() CreateRequest {
 	return CreateRequest{
 		IdempotencyKey:    "01b0e43b-f3a3-43f4-aa3d-113f67e1581a",
+		TenantID:          "tenant-test",
 		ExternalReference: "non-production-input-validation-only",
 		EvidenceType:      "metadata-validation",
 		ContentSHA256:     strings.Repeat("a", 64),

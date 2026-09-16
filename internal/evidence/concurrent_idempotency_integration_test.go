@@ -45,6 +45,7 @@ func TestStoreConcurrentIdempotentCreatePostgreSQLIntegration(t *testing.T) {
 	store := NewStore(pool)
 	request := CreateRequest{
 		IdempotencyKey:    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		TenantID:          "tenant-test",
 		ExternalReference: "concurrent-idempotency-reference",
 		EvidenceType:      "integration.concurrent-idempotency",
 		ContentSHA256:     "277089d91c0bdf4f2e6862ba7e4a07605119431f5d13f726dd352b06f1b206a9",

@@ -26,7 +26,7 @@ type Store interface {
 	Create(ctx context.Context, request evidence.CreateRequest) (evidence.Package, bool, error)
 	Get(ctx context.Context, packageID string) (evidence.Package, error)
 	RecordValidation(ctx context.Context, packageID string, request evidence.ValidationRequest) error
-	List(ctx context.Context, limit, offset int) ([]evidence.Package, error)
+	List(ctx context.Context, tenantID string, limit, offset int) ([]evidence.Package, error)
 }
 
 // Server wires the REST handlers.
@@ -95,7 +95,12 @@ type createBody struct {
 // POST /v1/evidence/packages — idempotent create; returns the retained
 // package plus a presigned upload descriptor for the raw evidence bytes.
 func (server *Server) createPackage(writer http.ResponseWriter, request *http.Request) {
-	if _, ok := principalOrFail(writer, request); !ok {
+	principal, ok := principalOrFail(writer, request)
+	if !ok {
+		return
+	}
+	if strings.TrimSpace(principal.TenantID) == "" {
+		writeError(writer, http.StatusForbidden, "principal has no tenant binding")
 		return
 	}
 	var body createBody
@@ -110,6 +115,7 @@ func (server *Server) createPackage(writer http.ResponseWriter, request *http.Re
 	}
 	create := evidence.CreateRequest{
 		IdempotencyKey:    body.IdempotencyKey,
+		TenantID:          principal.TenantID,
 		ExternalReference: body.ExternalReference,
 		EvidenceType:      body.EvidenceType,
 		ContentSHA256:     body.ContentSHA256,
@@ -268,7 +274,7 @@ func (server *Server) listPackages(writer http.ResponseWriter, request *http.Req
 	}
 	limit := server.parseLimit(request)
 	offset := parseOffset(request)
-	records, err := server.Store.List(request.Context(), limit, offset)
+	records, err := server.Store.List(request.Context(), principal.TenantID, limit, offset)
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, "evidence package listing failed")
 		return
@@ -286,7 +292,9 @@ func (server *Server) listPackages(writer http.ResponseWriter, request *http.Req
 	})
 }
 
-// loadPackage loads the package and enforces the clearance floor.
+// loadPackage loads the package and enforces the tenant boundary and the
+// clearance floor. A package outside the caller's tenant is reported as
+// not-found so package UUIDs never become a cross-tenant existence oracle.
 func (server *Server) loadPackage(writer http.ResponseWriter, request *http.Request, principal auth.Principal) (evidence.Package, bool) {
 	packageID := request.PathValue("id")
 	record, err := server.Store.Get(request.Context(), packageID)
@@ -296,6 +304,10 @@ func (server *Server) loadPackage(writer http.ResponseWriter, request *http.Requ
 	}
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, "evidence package query failed")
+		return evidence.Package{}, false
+	}
+	if record.TenantID != principal.TenantID {
+		writeError(writer, http.StatusNotFound, "evidence package not found")
 		return evidence.Package{}, false
 	}
 	if !auth.ClearanceCovers(principal.Clearance, record.Classification) {
