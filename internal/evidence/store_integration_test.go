@@ -34,6 +34,7 @@ func TestStorePostgreSQLIntegration(t *testing.T) {
 	store := NewStore(pool)
 	request := CreateRequest{
 		IdempotencyKey:    "11111111-1111-4111-8111-111111111111",
+		TenantID:          "tenant-test",
 		ExternalReference: "approved-local-integration-reference",
 		EvidenceType:      "integration.conformance",
 		ContentSHA256:     "277089d91c0bdf4f2e6862ba7e4a07605119431f5d13f726dd352b06f1b206a9",
@@ -131,7 +132,8 @@ func TestStorePostgreSQLIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load evidence package: %v", err)
 	}
-	if loaded.ValidationStatus != StatusReceived {
-		t.Fatalf("immutable package status changed to %q", loaded.ValidationStatus)
+	// H2/M2: the terminal decision is persisted on the package row.
+	if loaded.ValidationStatus != StatusValidated && loaded.ValidationStatus != StatusRejected {
+		t.Fatalf("package status %q was not persisted from the terminal validation", loaded.ValidationStatus)
 	}
 }
