@@ -24,7 +24,10 @@ var validClassifications = map[string]struct{}{
 // CreateRequest contains metadata and a digest/reference to externally retained evidence.
 // Raw evidence content is intentionally outside this service boundary.
 type CreateRequest struct {
-	IdempotencyKey    string    `json:"idempotency_key"`
+	IdempotencyKey string `json:"idempotency_key"`
+	// TenantID is the creating principal's tenant binding; it is supplied by
+	// the API layer from the authenticated principal, never by the caller.
+	TenantID          string    `json:"tenant_id"`
 	ExternalReference string    `json:"external_reference"`
 	EvidenceType      string    `json:"evidence_type"`
 	ContentSHA256     string    `json:"content_sha256"`
@@ -37,6 +40,7 @@ type CreateRequest struct {
 type Package struct {
 	EvidencePackageID string    `json:"evidence_package_id"`
 	IdempotencyKey    string    `json:"idempotency_key"`
+	TenantID          string    `json:"tenant_id"`
 	ExternalReference string    `json:"external_reference"`
 	EvidenceType      string    `json:"evidence_type"`
 	ContentSHA256     string    `json:"content_sha256"`
@@ -72,6 +76,9 @@ func DecodeCreateRequest(body []byte) (CreateRequest, error) {
 func (r CreateRequest) Validate() error {
 	if !isUUID(r.IdempotencyKey) {
 		return errors.New("idempotency_key must be a UUID")
+	}
+	if strings.TrimSpace(r.TenantID) == "" || len(r.TenantID) > 128 {
+		return errors.New("tenant_id is required and must not exceed 128 characters")
 	}
 	if !isUUID(r.CorrelationID) {
 		return errors.New("correlation_id must be a UUID")
