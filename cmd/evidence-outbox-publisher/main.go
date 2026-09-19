@@ -87,6 +87,7 @@ func run() error {
 		return fmt.Errorf("ping kafka: %w", err)
 	}
 
+	log.Printf("evidence-outbox-publisher published topics: %s, %s", events.TopicPackage, events.TopicValidation)
 	log.Printf("evidence-outbox-publisher draining evidence_outbox to %v", brokers)
 	for {
 		published, err := publishBatch(ctx, pool, producer, signer.PublicKey(), batchSize)
